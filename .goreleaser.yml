@@ -1,0 +1,39 @@
+before:
+  hooks:
+    - go mod download
+    - go generate ./...
+
+builds:
+  -
+    main: ./cmd/provider.go
+
+    env:
+    - CGO_ENABLED=0
+
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath #removes all file system paths from the compiled executable
+      - -ldflags
+      - '-s -w'
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: vcr-credential-provider
+
+archives:
+  -
+    format: zip
+    files:
+      - none*
+    name_template: '{{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: '{{ .ProjectName }}_v{{ .Version }}_SHA256SUMS'
+  algorithm: sha256
+
+release:
+  draft: false
+
+changelog:
+  skip: false

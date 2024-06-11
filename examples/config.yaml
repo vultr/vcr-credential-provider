@@ -1,0 +1,12 @@
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+
+providers:
+  - name: vcr-credential-provider
+    matchImages:
+      - "*.vultrcr.com"
+    defaultCacheDuration: "12h"
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+    env:
+      - name: VULTR_API_KEY
+        value: "ABC123"
