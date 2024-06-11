@@ -11,7 +11,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 )
 
@@ -74,14 +73,12 @@ func extractRepo(imageName string) string {
 }
 
 func extractHostname(imageName string) string {
-	regexPattern := `^(?:https?://)?(?:[^@/\n]+@)?(?:www\.)?([^:/\n]+)`
-	regex := regexp.MustCompile(regexPattern)
-	match := regex.FindStringSubmatch(imageName)
-	var hostname string
-	if len(match) > 1 {
-		hostname = match[1]
+	u, err := url.Parse(imageName)
+	if err != nil {
+		panic(err)
 	}
-	return hostname
+
+	return u.Host
 }
 
 func readCredentialProviderRequestFromStdin() CredentialProviderRequest {
@@ -105,7 +102,7 @@ func readCredentialProviderRequestFromStdin() CredentialProviderRequest {
 }
 
 func (d *Driver) GetVultrCRCredentialResponse(ctx context.Context) {
-	expireSecond := 60
+	expireSecond := 43200
 	writeAccess := false
 	vcrID := ""
 
@@ -163,7 +160,7 @@ func (d *Driver) GetVultrCRCredentialResponse(ctx context.Context) {
 		APIVersion:    "credentialprovider.kubelet.k8s.io/v1",
 		Kind:          "CredentialProviderResponse",
 		CacheKeyType:  "Registry",
-		CacheDuration: "1m0s",
+		CacheDuration: "12h",
 		Auth: map[string]AuthConfig{
 			registryHostname: {
 				Username: credArr[0],
