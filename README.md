@@ -16,3 +16,5 @@ In Managed VKE the flags will be set by the cloud provider(Vultr), however, if y
 ## Contributing
 
 We are open to contributions. If you are wanting to contribute or open a bug please feel free to raise an issue with more information. 
+
+Current Version: v0.0.1
