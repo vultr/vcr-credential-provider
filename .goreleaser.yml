@@ -1,3 +1,5 @@
+version: 2
+
 before:
   hooks:
     - go mod download
@@ -5,7 +7,7 @@ before:
 
 builds:
   -
-    main: ./cmd/provider.go
+    main: ./cmd
 
     env:
     - CGO_ENABLED=0
@@ -13,8 +15,8 @@ builds:
     mod_timestamp: '{{ .CommitTimestamp }}'
     flags:
       - -trimpath #removes all file system paths from the compiled executable
-      - -ldflags
-      - '-s -w'
+    ldflags:
+      - -s -w
     goos:
       - linux
     goarch:
@@ -25,7 +27,7 @@ builds:
 
 archives:
   -
-    format: zip
+    formats: [zip]
     files:
       - none*
     name_template: '{{ .ProjectName }}_v{{ .Version }}_{{ .Os }}_{{ .Arch }}'
@@ -38,4 +40,4 @@ release:
   draft: false
 
 changelog:
-  skip: false
+  disable: false

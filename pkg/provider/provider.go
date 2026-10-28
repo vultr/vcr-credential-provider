@@ -5,14 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/vultr/govultr/v3"
-	"golang.org/x/oauth2"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/vultr/govultr/v3"
+	"golang.org/x/oauth2"
 )
+
+const apiVersion = "credentialprovider.kubelet.k8s.io/v1"
 
 type CredentialProviderRequest struct {
 	APIVersion string `json:"apiVersion"`
@@ -46,134 +49,131 @@ type Auth struct {
 }
 
 func NewDriver() *Driver {
-	apiKey := os.Getenv("VULTR_API_KEY")
-
-	config := &oauth2.Config{}
-	ctx := context.Background()
-	ts := config.TokenSource(ctx, &oauth2.Token{AccessToken: apiKey})
-	vultrClient := govultr.NewClient(oauth2.NewClient(ctx, ts))
-
-	_ = vultrClient.SetBaseURL("https://api.vultr.com")
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: os.Getenv("VULTR_API_KEY")})
+	client := oauth2.NewClient(context.Background(), ts)
+	client.Timeout = 30 * time.Second
+	vultrClient := govultr.NewClient(client)
 	vultrClient.SetUserAgent("vcr-credential-provider")
-
-	return &Driver{
-		Client: vultrClient,
-	}
+	return &Driver{Client: vultrClient}
 }
 
-func extractRepo(imageName string) string {
-	u, err := url.Parse(imageName)
+// parseImage handles kubelet image references (host/registry/repository:tag),
+// which are not URLs. Only VCR hosts may receive the returned credentials.
+func parseImage(image string) (host, registry string, err error) {
+	parts := strings.SplitN(image, "/", 3)
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" ||
+		strings.ContainsAny(image, " \t\r\n?#\\") || strings.Contains(image, "://") {
+		return "", "", fmt.Errorf("expected a VCR image in host/registry/repository format")
+	}
+	u, err := url.Parse("https://" + parts[0])
+	if err != nil || u.User != nil || u.Host != parts[0] || u.Port() != "" ||
+		!strings.HasSuffix(parts[0], ".vultrcr.com") || strings.TrimSuffix(parts[0], ".vultrcr.com") == "" ||
+		strings.ContainsAny(parts[1], ":@*") || parts[1] == "." || parts[1] == ".." {
+		return "", "", fmt.Errorf("invalid VCR host or registry")
+	}
+	return parts[0], parts[1], nil
+}
+
+// Run reads one kubelet request and writes only the JSON response to output.
+func (d *Driver) Run(ctx context.Context, input io.Reader, output io.Writer) error {
+	var request CredentialProviderRequest
+	decoder := json.NewDecoder(input)
+	if err := decoder.Decode(&request); err != nil {
+		return fmt.Errorf("decode credential provider request: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("expected exactly one credential provider request")
+	}
+	response, err := d.credentials(ctx, request)
 	if err != nil {
-		panic(err)
+		return err
 	}
-
-	splitStr := strings.Split(u.Path, "/")
-
-	return splitStr[1]
+	if err := json.NewEncoder(output).Encode(response); err != nil {
+		return fmt.Errorf("encode credential provider response: %w", err)
+	}
+	return nil
 }
 
-func extractHostname(imageName string) string {
-	u, err := url.Parse(imageName)
+func (d *Driver) GetVultrCRCredentialResponse(ctx context.Context) error {
+	return d.Run(ctx, os.Stdin, os.Stdout)
+}
+
+func (d *Driver) credentials(ctx context.Context, request CredentialProviderRequest) (*CredentialProviderResponse, error) {
+	if request.APIVersion != apiVersion || request.Kind != "CredentialProviderRequest" {
+		return nil, fmt.Errorf("expected %s CredentialProviderRequest", apiVersion)
+	}
+	host, registry, err := parseImage(request.Image)
 	if err != nil {
-		panic(err)
+		return nil, err
+	}
+	id, err := d.registryID(ctx, registry)
+	if err != nil {
+		return nil, err
 	}
 
-	return u.Host
-}
-
-func readCredentialProviderRequestFromStdin() CredentialProviderRequest {
-	var credentialProviderRequest CredentialProviderRequest
-
-	stat, err := os.Stdin.Stat()
-	if err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
-		input, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		err = json.Unmarshal(input, &credentialProviderRequest)
-		if err != nil {
-			log.Fatalln(err)
-		}
-	} else {
-		log.Fatalln("provider credential request not supplied to stdin")
-	}
-
-	return credentialProviderRequest
-}
-
-func (d *Driver) GetVultrCRCredentialResponse(ctx context.Context) {
-	expireSecond := 43200
+	// TODO: govultr v3.33.2 serializes the ExpirySeconds pointer rather than
+	// its value. Keep using the SDK pending an upstream fix.
+	expirySeconds := 43200
 	writeAccess := false
-	vcrID := ""
-
-	credentialProviderRequest := readCredentialProviderRequestFromStdin()
-	registryName := extractRepo(credentialProviderRequest.Image)
-	registryHostname := extractHostname(credentialProviderRequest.Image)
-
-	listOptions := &govultr.ListOptions{PerPage: 300}
-
-	for {
-		i, meta, _, err := d.Client.ContainerRegistry.List(ctx, listOptions) //nolint:bodyclose
-		if err != nil {
-			log.Fatalln(err)
-		}
-
-		for _, v := range i { //nolint
-			if v.Name == registryName {
-				vcrID = v.ID
-				break
-			}
-		}
-
-		if meta.Links.Next == "" {
-			break
-		}
-
-		listOptions.Cursor = meta.Links.Next
-	}
-
-	creds, _, err := d.Client.ContainerRegistry.CreateDockerCredentials(ctx, vcrID, &govultr.DockerCredentialsOpt{
-		ExpirySeconds: &expireSecond,
+	creds, _, err := d.Client.ContainerRegistry.CreateDockerCredentials(ctx, id, &govultr.DockerCredentialsOpt{
+		ExpirySeconds: &expirySeconds,
 		WriteAccess:   &writeAccess,
 	})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("create registry credentials: %w", err)
 	}
-
 	var auths DockerCreds
-
-	err = json.Unmarshal([]byte(creds.String()), &auths)
-	if err != nil {
-		panic(err)
+	if creds == nil {
+		return nil, fmt.Errorf("empty registry credentials response")
 	}
-
-	authCred := auths.Repo[registryHostname].Creds
-
-	data, err := base64.StdEncoding.DecodeString(authCred)
-	if err != nil {
-		log.Fatal("error:", err)
+	if err := json.Unmarshal([]byte(*creds), &auths); err != nil {
+		return nil, fmt.Errorf("invalid registry credentials JSON")
 	}
-
-	credArr := strings.Split(string(data), ":")
-
-	newResponse := CredentialProviderResponse{
-		APIVersion:    "credentialprovider.kubelet.k8s.io/v1",
-		Kind:          "CredentialProviderResponse",
-		CacheKeyType:  "Registry",
-		CacheDuration: "12h",
+	auth, ok := auths.Repo[host]
+	if !ok || auth.Creds == "" {
+		return nil, fmt.Errorf("credentials response has no auth for %s", host)
+	}
+	data, err := base64.StdEncoding.DecodeString(auth.Creds)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 registry credentials")
+	}
+	username, password, ok := strings.Cut(string(data), ":")
+	if !ok || username == "" || password == "" {
+		return nil, fmt.Errorf("registry credentials must contain a non-empty username and password")
+	}
+	return &CredentialProviderResponse{
+		APIVersion: apiVersion,
+		Kind:       "CredentialProviderResponse",
+		// VCR namespaces share a hostname but require different credentials.
+		CacheKeyType: "Image",
+		// Leave a margin before the API's 12-hour credential expiry.
+		CacheDuration: "11h55m",
 		Auth: map[string]AuthConfig{
-			registryHostname: {
-				Username: credArr[0],
-				Password: credArr[1],
-			},
+			host + "/" + registry: {Username: username, Password: password},
 		},
+	}, nil
+}
+
+func (d *Driver) registryID(ctx context.Context, name string) (string, error) {
+	options := &govultr.ListOptions{PerPage: 300}
+	seen := make(map[string]bool)
+	for {
+		registries, meta, _, err := d.Client.ContainerRegistry.List(ctx, options)
+		if err != nil {
+			return "", fmt.Errorf("list registries: %w", err)
+		}
+		for _, registry := range registries {
+			if registry.Name == name && registry.ID != "" {
+				return registry.ID, nil
+			}
+		}
+		if meta == nil || meta.Links == nil || meta.Links.Next == "" {
+			return "", fmt.Errorf("VCR registry %q not found", name)
+		}
+		if seen[meta.Links.Next] {
+			return "", fmt.Errorf("registry API returned a repeated pagination cursor")
+		}
+		options.Cursor = meta.Links.Next
+		seen[options.Cursor] = true
 	}
-
-	result, err := json.Marshal(newResponse)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(string(result))
-
 }

@@ -1,32 +1,19 @@
-VERSION ?= $VERSION
-REGISTRY ?= $REGISTRY
+GOARCH ?= amd64
 
-.PHONY: deploy
-deploy: clean docker-build docker-push
+.PHONY: build build-linux clean test lint
 
-.PHONY: build
 build:
-	@echo "building vcr-credential-provider"
-	go build -trimpath -o dist/vcr-credential-provider .
+	go build -trimpath -o dist/vcr-credential-provider ./cmd
 
-.PHONY: build-linux
 build-linux:
-	@echo "building vcr-credential-provider for linux"
-	GOOS=linux GOARCH=amd64 GCO_ENABLED=0 go build  -trimpath -o dist/vcr-credential-provider ./cmd/provider.go
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -o dist/vcr-credential-provider ./cmd
 
-.PHONY: docker-build
-docker-build:
-	@echo "building docker image to dockerhub $(REGISTRY) with version $(VERSION)"
-	docker build . -t $(REGISTRY)/vcr-credential-provider:$(VERSION)
-
-.PHONY: docker-push
-docker-push:
-	docker push $(REGISTRY)/vcr-credential-provider:$(VERSION)
-
-.PHONY: clean
 clean:
-	go clean -i -x ./...
+	go clean ./...
+	rm -rf dist
 
-.PHONY: test
 test:
-	go test -race github.com/vultr/vcr-credential-provider/pkg -v
+	go test -race ./...
+
+lint:
+	golangci-lint run --timeout=5m ./...
