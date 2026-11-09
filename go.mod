@@ -3,7 +3,7 @@ module github.com/vultr/vcr-credential-provider
 go 1.27.3
 
 require (
-	github.com/vultr/govultr/v3 v3.33.2
+	github.com/vultr/govultr/v3 v3.34.0
 	golang.org/x/oauth2 v0.37.0
 )
 
